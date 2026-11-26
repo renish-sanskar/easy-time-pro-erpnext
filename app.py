@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 import csv, hmac, io, os, secrets, sqlite3, threading, time
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 from flask import Flask, Response, flash, jsonify, redirect, render_template_string, request, url_for
 
@@ -17,7 +17,7 @@ DEFAULTS = {
     "erp_url": "http://localhost:8000", "erp_key": "", "erp_secret": "",
     "employee_field": "attendance_device_id",  # Employee field holding the ETP emp_code
     "start_date": datetime.now().strftime("%Y-%m-%d"),  # first sync pulls from here
-    "interval_min": "5", "auto_sync": "0", "last_sync": "",
+    "interval_min": "5", "auto_sync": "0", "last_sync": "", "lookback_days": "1",
     "webhook_token": secrets.token_urlsafe(16), "last_ok_sync": "",
 }
 # columns added after v1: (name, ddl) -> applied to an existing db by init()
@@ -187,7 +187,14 @@ def sync(trigger="manual", fetch=True, fetched=0):
         note, ok = "", True
         if fetch:
             try:
-                new, bad = ingest(fetch_punches(c, c["last_sync"] or c["start_date"] + " 00:00:00", started), started)
+                since = c["start_date"] + " 00:00:00"
+                if c["last_sync"]:  # also re-read a few days back: a punch that reaches Easy TimePro late still carries its old time
+                    try:
+                        days = max(int(c["lookback_days"]), 0)
+                    except ValueError:
+                        days = 1
+                    since = (datetime.strptime(c["last_sync"], "%Y-%m-%d %H:%M:%S") - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+                new, bad = ingest(fetch_punches(c, since, started), started)
                 fetched += new
                 set_cfg(last_sync=started)
                 note = f"{bad} unreadable punches skipped" if bad else ""
@@ -353,7 +360,8 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 <label>Employee field with the punch code<input name=employee_field value="{{c.employee_field}}"><small>The Easy TimePro employee code is matched to this field on the Employee.</small></label></section></div>
 <section class=panel><h3>Schedule</h3><div class=two>
 <label>Auto sync<select name=auto_sync><option value=1 {{'selected' if c.auto_sync=='1'}}>On<option value=0 {{'selected' if c.auto_sync!='1'}}>Off</select></label>
-<label>Run every (minutes)<input type=number min=1 name=interval_min value="{{c.interval_min}}"></label></div></section>
+<label>Run every (minutes)<input type=number min=1 name=interval_min value="{{c.interval_min}}"></label>
+<label>Re-read the last (days)<input type=number min=0 name=lookback_days value="{{c.lookback_days}}"><small>Each sync also re-reads this many days before the last sync, to catch punches that reached Easy TimePro late (for example from a machine that was offline). Punches already stored are skipped. Use 0 to switch it off.</small></label></div></section>
 <section class=panel><h3>Receive punches from Easy TimePro</h3><p class=sub>If the server can push punches to a URL, point it here with a POST (click to select):</p>
 <label style="margin-top:8px"><input readonly onclick="this.select()" value="{{request.host_url}}api/punches?token={{c.webhook_token}}"></label></section>
 <div class=bar2 style="margin-top:0"><button>Save</button><button class=alt formaction="{{url_for('test')}}">Save and test connections</button></div></form>

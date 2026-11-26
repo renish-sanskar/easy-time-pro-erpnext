@@ -80,6 +80,34 @@ with app.db() as d:
 assert app.cfg()["last_ok_sync"] != ""  # everything pushed: now it moves
 print("OK erp down")
 
+seen = []
+def spy(c, since, until):
+    seen.append(since); return iter([])
+app.fetch_punches = spy
+app.set_cfg(start_date="2026-11-01", last_sync="", lookback_days="2"); app.sync()
+assert seen[-1] == "2026-11-01 00:00:00"  # first sync: from the start date
+app.set_cfg(last_sync="2026-11-25 10:00:00"); app.sync()
+assert seen[-1] == "2026-11-23 10:00:00"  # later syncs: 2 days before the last sync
+app.set_cfg(lookback_days="0", last_sync="2026-11-25 10:00:00"); app.sync()
+assert seen[-1] == "2026-11-25 10:00:00"
+app.set_cfg(lookback_days="oops", last_sync="2026-11-25 10:00:00"); app.sync()
+assert seen[-1] == "2026-11-24 10:00:00"  # unreadable value falls back to 1 day
+
+late = punch("77", "25-11-2026 07:00:00", "Check In")  # punch time is before the last sync, but it only reached the server afterwards
+app.fetch_punches = lambda c, since, until: iter([late] if "2026-11-25 07:00:00" >= since else [])
+def late_rows():
+    with app.db() as d:
+        return d.execute("SELECT COUNT(*) FROM log WHERE emp_code='77'").fetchone()[0]
+app.set_cfg(lookback_days="0", last_sync="2026-11-25 10:00:00"); app.sync()
+assert late_rows() == 0  # missed without the look-back
+app.set_cfg(lookback_days="1", last_sync="2026-11-25 10:00:00"); app.sync()
+assert late_rows() == 1  # caught with it
+app.set_cfg(last_sync="2026-11-25 10:00:00"); app.sync()
+assert late_rows() == 1 and calls.count("77|2026-11-25 07:00:00|IN") == 1  # re-reading again stores and pushes nothing twice
+cl.post("/config", data={"lookback_days": "3"}); assert app.cfg()["lookback_days"] == "3"
+assert b"Re-read the last (days)" in cl.get("/config").data
+print("OK lookback")
+
 started = []
 app.sync = lambda *a, **k: started.append(1)
 assert cl.post("/sync").status_code == 302

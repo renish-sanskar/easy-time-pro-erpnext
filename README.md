@@ -39,6 +39,7 @@ Then open http://localhost:5000 and fill in **Settings**:
 | ERPNext address, API key, API secret | Where Employee Checkins are created |
 | Employee field | The Employee field that holds the Easy TimePro code |
 | Auto sync, run every N minutes | Scheduled syncing |
+| Re-read the last N days | Each sync also re-reads N days before the last sync (default 1), to catch punches that reached Easy TimePro late, for example from a machine that was offline. Set it to at least the number of days a machine can stay offline. Stored punches are skipped, so nothing is pushed twice. 0 turns it off |
 
 Use **Save and test connections** to check both logins.
 
