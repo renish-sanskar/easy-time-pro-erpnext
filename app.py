@@ -266,8 +266,8 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8><title>Attendan
 <style>
 :root{--bg:#f4f5f6;--card:#fff;--ink:#1f272e;--mut:#6c7680;--line:#d9dee3;--soft:#f8f9fa;--blue:#0089ff;--green:#5fa32c;
 --ok:#2f8f4e;--err:#d6382f;--warn:#b7791f;--wait:#7b8794}
-@media(prefers-color-scheme:dark){:root{--bg:#161a1f;--card:#1f242b;--ink:#e6e9ed;--mut:#98a2ad;--line:#333b45;--soft:#262c34;--blue:#3aa0ff;--green:#8bc34a;
---ok:#5cc07c;--err:#ff7a70;--warn:#e0b050;--wait:#98a2ad}}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#0c0c0c;--ink:#ececec;--mut:#9b9b9b;--line:#262626;--soft:#151515;--blue:#3aa0ff;--green:#8bc34a;
+--ok:#5cc07c;--err:#ff7a70;--warn:#e0b050;--wait:#8c8c8c}}
 *{box-sizing:border-box}body{margin:0;font:13px/1.5 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
 a{color:var(--blue)}
 header{background:var(--card);border-bottom:1px solid var(--line)}
