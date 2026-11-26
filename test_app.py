@@ -122,6 +122,37 @@ cl.post("/config", data={"lookback_days": "3"}); assert app.cfg()["lookback_days
 assert b"Re-read the last (days)" in cl.get("/config").data
 print("OK lookback")
 
+# --- Alternate IN / OUT checkbox + same-punch window
+def day(code, ds="29-11-2026"):
+    with app.db() as d:
+        return [(r[0], r[1]) for r in d.execute("SELECT substr(punch_time,12,5), log_type FROM log WHERE emp_code=? ORDER BY punch_time", (code,))]
+
+app.set_cfg(alt_inout="0")
+mixed = lambda code: [punch(code, f"29-11-2026 {hm}:00", "Check In") for hm in ("09:00", "09:02", "09:04", "09:05", "09:08")]
+app.ingest(mixed("A1"), app.now())
+assert [x[1] for x in day("A1")] == ["IN"] * 5  # off: PUNCH_STATE is used
+assert b'id=gapbox style="display:none"' in cl.get("/config").data
+cl.post("/config", data={"alt_inout": ["1", "0"], "min_gap": "0"})  # a ticked box is sent before the hidden 0
+assert app.cfg()["alt_inout"] == "1" and b'id=gapbox style=""' in cl.get("/config").data
+app.ingest(mixed("A2"), app.now())
+assert [x[1] for x in day("A2")] == ["IN", "OUT", "IN", "OUT", "IN"], day("A2")
+assert app.ingest(mixed("A2"), app.now())[0] == 0  # the same punches again are not stored twice
+cl.post("/config", data={"alt_inout": ["1", "0"], "min_gap": "3"})
+app.ingest(mixed("A3"), app.now())
+assert day("A3") == [("09:00", "IN"), ("09:02", "IN"), ("09:04", "OUT"), ("09:05", "OUT"), ("09:08", "IN")], day("A3")
+cl.post("/config", data={"alt_inout": "0", "min_gap": "0"})
+
+# --- console: read-only, punch tables only
+r = cl.post("/console", data={"sql": "SELECT COUNT(*) AS n FROM log"})
+assert b"<th>n" in r.data and b"1 row" in r.data
+for bad in ("DELETE FROM log", "SELECT * FROM config", "SELECT 1; DROP TABLE log", "UPDATE log SET status='x'", "DROP TABLE log"):
+    h = cl.post("/console", data={"sql": bad}).data
+    assert b"class=msg" in h and tok.encode() not in h, bad
+assert b"Console" in cl.get("/console").data
+with app.db() as d:
+    assert d.execute("SELECT COUNT(*) FROM log").fetchone()[0] > 0 and d.execute("SELECT COUNT(*) FROM config").fetchone()[0] > 0
+print("OK alt + console")
+
 started = []
 app.sync = lambda *a, **k: started.append(1)
 assert cl.post("/sync").status_code == 302

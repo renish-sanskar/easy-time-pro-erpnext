@@ -17,7 +17,7 @@ DEFAULTS = {
     "erp_url": "http://localhost:8000", "erp_key": "", "erp_secret": "",
     "employee_field": "attendance_device_id",  # Employee field holding the ETP emp_code
     "start_date": datetime.now().strftime("%Y-%m-%d"),  # first sync pulls from here
-    "interval_min": "5", "auto_sync": "0", "last_sync": "", "lookback_days": "1",
+    "interval_min": "5", "auto_sync": "0", "last_sync": "", "lookback_days": "1", "alt_inout": "0", "min_gap": "0",
     "webhook_token": secrets.token_urlsafe(16), "last_ok_sync": "",
 }
 # columns added after v1: (name, ddl) -> applied to an existing db by init()
@@ -193,15 +193,37 @@ def normalize(p, strict=False):
 
 def ingest(punches, ts, strict=False):
     """Store punches as pending; returns (new, unreadable). Same punch twice is ignored."""
-    rows, bad = [], 0
+    rows, bad, parsed = [], 0, []
     for p in punches:  # may page through the ETP API: do it before taking the DB write lock
         try:
-            r = normalize(p, strict)
+            parsed.append(normalize(p, strict))
         except (KeyError, ValueError, AttributeError, TypeError):
             bad += 1
-            continue
-        rows.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, r["latitude"], r["longitude"], ts, ts))
+    c = cfg()
+    alt = c["alt_inout"] == "1"
+    try:
+        gap = timedelta(minutes=max(int(c["min_gap"]), 0))
+    except ValueError:
+        gap = timedelta(0)
+    state, f = {}, "%Y-%m-%d %H:%M:%S"
     with db() as d:
+        for r in (sorted(parsed, key=lambda r: r["punch_time"]) if alt else parsed):
+            if alt:  # checkbox in Settings: ignore PUNCH_STATE, a person's day alternates IN, OUT, IN...; one missed punch flips the rest of that day
+                if d.execute("SELECT 1 FROM log WHERE emp_code=? AND punch_time=?", (r["emp_code"], r["punch_time"])).fetchone():
+                    continue
+                k = (r["emp_code"], r["punch_time"][:10])
+                if k not in state:  # [start of the current group, groups so far]: punches within the gap of a group's first punch share its IN/OUT
+                    state[k] = [None, 0]
+                    for (pt,) in d.execute("SELECT punch_time FROM log WHERE emp_code=? AND substr(punch_time,1,10)=? ORDER BY punch_time", k):
+                        t = datetime.strptime(pt, f)
+                        if state[k][0] is None or t - state[k][0] > gap:
+                            state[k] = [t, state[k][1] + 1]
+                t = datetime.strptime(r["punch_time"], f)
+                if state[k][0] is None or t - state[k][0] > gap:
+                    state[k] = [t, state[k][1] + 1]
+                r["log_type"] = "IN" if state[k][1] % 2 else "OUT"
+                r["tx_id"] = f"{r['emp_code']}|{r['punch_time']}|{r['log_type']}"
+            rows.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, r["latitude"], r["longitude"], ts, ts))
         before = d.total_changes
         d.executemany(
             "INSERT OR IGNORE INTO log(tx_id, emp_code, punch_time, log_type, device, employee_name, latitude, longitude, status, message, attempts, created, updated)"
@@ -332,7 +354,7 @@ td.wrap{white-space:normal;max-width:330px;color:var(--mut);font-size:12px}td.n,
 .num.ok span:before{background:var(--ok)}.num.error span:before{background:var(--err)}.num.duplicate span:before{background:var(--warn)}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:20px 22px}
 label{display:block;color:var(--mut);margin:14px 0 6px}label small{display:block;margin-top:3px;font-size:12px}
-input,select{height:36px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--ink);font:inherit;width:100%}
+input,select,textarea{height:36px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--ink);font:inherit;width:100%}
 input:focus,select:focus{outline:0;border-color:var(--blue);background:var(--card)}input[readonly]{font-family:ui-monospace,Consolas,monospace;font-size:12px}
 button,.btn{background:var(--blue);color:#fff;border:1px solid var(--blue);padding:7px 16px;border-radius:6px;cursor:pointer;font:inherit;text-decoration:none;display:inline-block;white-space:nowrap;line-height:20px}
 button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}button.sm{padding:3px 12px;font-size:12px;line-height:18px}
@@ -348,7 +370,7 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 </style></head><body>
 <header><div class=bar>
 <a class=brand href="{{url_for('dash')}}"><img src="{{url_for('static',filename='easytimepro.jpg')}}" alt="Easy TimePro" title="Easy TimePro"><span class=arr>→</span><img src="{{url_for('static',filename='erpnext.svg')}}" alt=ERPNext title=ERPNext><b>Attendance Sync</b></a>
-<nav>{% for p,e,l in [('dash','dash','Dashboard'),('logs','logs','Punches'),('runs','runs_page','Sync history'),('cfg','cfg_page','Settings')] %}<a href="{{url_for(e)}}" class="{{'on' if page==p}}">{{l}}</a>{% endfor %}</nav>
+<nav>{% for p,e,l in [('dash','dash','Dashboard'),('logs','logs','Punches'),('runs','runs_page','Sync history'),('console','console','Console'),('cfg','cfg_page','Settings')] %}<a href="{{url_for(e)}}" class="{{'on' if page==p}}">{{l}}</a>{% endfor %}</nav>
 <span class=state>{% if running %}<span class=dot></span>Sync running…{% elif c.auto_sync=='1' %}Auto sync every {{c.interval_min}} min{% else %}Auto sync is off{% endif %}</span></div></header>
 <main>{% for m in get_flashed_messages() %}<div class=msg>{{m}}</div>{% endfor %}
 
@@ -381,6 +403,13 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 
 {% elif page=='runs' %}<div class=ph><div><h2>Sync history</h2><p class=sub>Every time the app pulled and pushed punches.</p></div></div>{{runtable(runs)}}{{pager('runs_page', a, page_no, pages, total)}}
 
+{% elif page=='console' %}<div class=ph><div><h2>Console</h2><p class=sub>Run a read-only SELECT on this app's own punch log (tables <b>log</b> and <b>sync_run</b>; first {{limit}} rows are shown).</p></div></div>
+<form method=post class="panel"><label style="margin-top:0">SQL<textarea name=sql spellcheck=false style="height:130px;padding:10px 12px;font:12px/1.5 ui-monospace,Consolas,monospace">{{sql}}</textarea></label>
+<div class=bar2 style="margin-top:14px"><button>Run</button></div></form>
+{% if err %}<div class=msg style="border-left-color:var(--err);margin:16px 0 0">{{err}}</div>{% endif %}
+{% if qcols %}<div class=sec><h3>{{qrows|length}} row{{'' if qrows|length==1 else 's'}}{{' (more rows were cut off)' if cut}}</h3></div>
+<div class=tw><table><tr>{% for k in qcols %}<th>{{k}}{% endfor %}</tr>{% for r in qrows %}<tr>{% for v in r %}<td>{{v}}{% endfor %}</tr>{% else %}<tr><td colspan={{qcols|length}} class=empty>No rows.</tr>{% endfor %}</table></div>{% endif %}
+
 {% else %}<div class=ph><div><h2>Settings</h2><p class=sub>Connection details are stored in this app's local database.</p></div></div><form method=post class=stack>
 <div class=two>
 <section class=panel><div class=hd><img src="{{url_for('static',filename='easytimepro.jpg')}}" alt=""><h3>Easy TimePro</h3></div>
@@ -393,6 +422,9 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 <label>API key<input name=erp_key value="{{c.erp_key}}" autocomplete=off></label>
 <label>API secret<input type=password name=erp_secret autocomplete=new-password placeholder="{{'saved – leave blank to keep' if c.erp_secret}}"></label>
 <label>Employee field with the punch code<input name=employee_field value="{{c.employee_field}}"><small>The Easy TimePro employee code is matched to this field on the Employee.</small></label></section></div>
+<section class=panel><h3>In / Out</h3>
+<label style="color:var(--ink)"><input type=checkbox name=alt_inout value=1 {{'checked' if c.alt_inout=='1'}} onchange="document.getElementById('gapbox').style.display=this.checked?'':'none'" style="width:auto;height:auto;vertical-align:-2px;margin-right:6px"><input type=hidden name=alt_inout value=0>Alternate IN / OUT<small style="color:var(--mut)">Ignore Easy TimePro's punch state and mark each person's punches of the day IN, OUT, IN, OUT… in time order.</small></label>
+<label id=gapbox style="{{'' if c.alt_inout=='1' else 'display:none'}}">Same In / Out within (minutes)<input type=number min=0 name=min_gap value="{{c.min_gap}}"><small>Punches by the same person within this many minutes of the first one get the same In / Out (09:00 In, 09:02 In, then the next punch after that is Out). Use 0 to switch it off.</small></label></section>
 <section class=panel><h3>Schedule</h3><div class=two>
 <label>Auto sync<select name=auto_sync><option value=1 {{'selected' if c.auto_sync=='1'}}>On<option value=0 {{'selected' if c.auto_sync!='1'}}>Off</select></label>
 <label>Run every (minutes)<input type=number min=1 name=interval_min value="{{c.interval_min}}"></label>
@@ -457,6 +489,37 @@ def runs_page():
         rows = d.execute("SELECT * FROM sync_run ORDER BY id DESC LIMIT ? OFFSET ?", (PER_PAGE, (n - 1) * PER_PAGE)).fetchall()
     return render("runs", runs=rows, total=total, page_no=n, pages=max(-(-total // PER_PAGE), 1))
 
+
+
+CONSOLE_ROWS = 200
+
+
+def only_punch_tables(action, table, *_):  # sqlite authorizer: read the punch log, never the config table (it holds the passwords)
+    if action == sqlite3.SQLITE_READ:
+        return sqlite3.SQLITE_OK if table in ("log", "sync_run") else sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE) else sqlite3.SQLITE_DENY
+
+
+@app.route("/console", methods=["GET", "POST"])
+def console():
+    sql = request.form.get("sql") or "SELECT * FROM log ORDER BY punch_time DESC LIMIT 100"
+    qcols, qrows, err, cut = [], [], "", False
+    if request.method == "POST":
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            con.set_authorizer(only_punch_tables)
+            t0 = time.time()
+            con.set_progress_handler(lambda: time.time() - t0 > 10, 10000)  # stop a runaway query after 10 s
+            cur = con.execute(sql)  # sqlite refuses more than one statement, and the connection is read-only
+            qcols = [d[0] for d in cur.description or ()]
+            rows = cur.fetchmany(CONSOLE_ROWS + 1)
+            cut = len(rows) > CONSOLE_ROWS
+            qrows = [["NULL" if v is None else (f"<{len(v)} bytes>" if isinstance(v, bytes) else str(v)[:200]) for v in r] for r in rows[:CONSOLE_ROWS]]
+        except Exception as e:
+            err = str(e)[:500]
+        finally:
+            con.close()
+    return render("console", sql=sql, qcols=qcols, qrows=qrows, err=err, cut=cut, limit=CONSOLE_ROWS)
 
 
 @app.route("/api/punches", methods=["POST"])
