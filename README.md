@@ -70,6 +70,15 @@ To receive punches instead, point Easy TimePro at the URL shown in **Settings** 
 - API keys and passwords are saved in plain text in `attendance.db`, which is not part of the repository.
 - The ERPNext and Easy TimePro logos in `static/` belong to their owners and are used only to label the two systems.
 
+## Receive punches by POST
+`POST /api/punches?token=<token>` (or header `X-Token`; the token is shown in Settings) with a JSON list, or `{"data": [...]}`, of punches in the Easy TimePro format. Keys are case-insensitive.
+
+- Required: `EMP_CODE` and `PUNCH_DATETIME` (or `PUNCH_TIME`).
+- `PUNCH_STATE` (or `LOG_TYPE`) must be `IN` or `OUT` here. Anything else makes the punch unreadable. The pull from Easy TimePro itself still understands its codes (`Check In`, `Break Out`, `0`..`5`).
+- Optional: `LATITUDE` (`LAT`, -90 to 90) and `LONGITUDE` (`LNG`, `LON`, `LONG`, -180 to 180). They are stored, shown in the Punches list and CSV, and sent to ERPNext, which fills in the Geolocation and checks the Shift Location radius when "Allow geolocation tracking" is on in HR Settings.
+- A punch is matched only to an Active Employee. Unknown or inactive codes show as Failed and are retried on every sync.
+- The reply is `{"received": n, "new": n, "unreadable": n}`.
+
 ## License
 
 [MIT](LICENSE)

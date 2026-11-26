@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-import csv, hmac, io, os, secrets, sqlite3, threading, time
+import csv, hmac, io, json, os, secrets, sqlite3, threading, time
 from datetime import datetime, timedelta
 import requests
 from flask import Flask, Response, flash, jsonify, redirect, render_template_string, request, url_for
@@ -22,7 +22,8 @@ DEFAULTS = {
 }
 # columns added after v1: (name, ddl) -> applied to an existing db by init()
 LOG_COLS = {"employee": "TEXT", "employee_name": "TEXT", "checkin": "TEXT",
-            "attempts": "INTEGER DEFAULT 0", "run_id": "INTEGER", "created": "TEXT"}
+            "attempts": "INTEGER DEFAULT 0", "run_id": "INTEGER", "created": "TEXT",
+            "latitude": "REAL", "longitude": "REAL"}
 
 
 @contextmanager
@@ -102,14 +103,33 @@ class ERPDown(Exception):
     """ERPNext unreachable / rejecting our credentials: not a problem with this one punch."""
 
 
+def active_employee(c, code):
+    """Employee id for a punch code, Active employees only (HRMS alone would also match someone who left). Cached per sync."""
+    cache = c.setdefault("_emp", {})
+    if code not in cache:
+        r = http.get(c["erp_url"].rstrip("/") + "/api/resource/Employee",
+                     headers={"Authorization": f"token {c['erp_key']}:{c['erp_secret']}"},
+                     params={"filters": json.dumps([[c["employee_field"], "=", code], ["status", "=", "Active"]]),
+                             "fields": '["name"]', "limit_page_length": 1}, timeout=30)
+        if not r.ok:
+            raise ERPDown(f"Employee lookup HTTP {r.status_code}: {r.text[:300]}")
+        data = r.json().get("data") or []
+        cache[code] = data[0]["name"] if data else None
+    return cache[code]
+
+
 def push(c, row):
     """-> (status, message, employee, employee_name, checkin_name)"""
+    emp = active_employee(c, row["emp_code"])
+    if not emp:
+        return "error", f"No active Employee with {c['employee_field']} = {row['emp_code']}", None, None, None
     r = http.post(
         c["erp_url"].rstrip("/") + "/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field",
         headers={"Authorization": f"token {c['erp_key']}:{c['erp_secret']}"},
-        json={"employee_field_value": row["emp_code"], "timestamp": row["punch_time"],
+        json={"employee_field_value": emp, "timestamp": row["punch_time"],
               "device_id": row["device"], "log_type": row["log_type"],
-              "employee_fieldname": c["employee_field"]}, timeout=30)
+              "latitude": row["latitude"], "longitude": row["longitude"],  # ERPNext derives geolocation and checks the shift-location radius from these
+              "employee_fieldname": "name"}, timeout=30)
     if r.ok:
         m = r.json().get("message") or {}
         return "ok", "", m.get("employee"), m.get("employee_name"), m.get("name")
@@ -136,8 +156,19 @@ def push_row(c, row, run_id):
     return res[0], down
 
 
-def normalize(p):
-    """Easy Time Pro punch (any key case) -> our row. Raises KeyError/ValueError when unusable."""
+def coord(v, limit):
+    if v in (None, ""):
+        return None
+    f = float(v)
+    if not -limit <= f <= limit:
+        raise ValueError(f"coordinate {v!r} out of range")
+    return f
+
+
+def normalize(p, strict=False):
+    """Easy Time Pro punch (any key case) -> our row. Raises KeyError/ValueError when unusable.
+    strict (the API): PUNCH_STATE / LOG_TYPE must be IN or OUT. Otherwise Easy TimePro codes like "Check In" or 0..5 are understood.
+    Optional LATITUDE (or LAT) and LONGITUDE (LNG, LON, LONG)."""
     p = {k.upper(): v for k, v in p.items()}
     raw = str(p.get("PUNCH_DATETIME") or p["PUNCH_TIME"]).strip()[:19]
     for f in ("%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
@@ -148,29 +179,34 @@ def normalize(p):
             pass
     else:
         raise ValueError(f"bad punch time {raw!r}")
-    st = str(p.get("PUNCH_STATE", "")).strip().lower()  # "Check In", "Break Out", or "0".."5"
+    st = str(p.get("PUNCH_STATE", p.get("LOG_TYPE", ""))).strip().lower()  # "Check In", "Break Out", or "0".."5"
+    if strict and st not in ("in", "out"):
+        raise ValueError(f"log_type must be IN or OUT, got {st!r}")
     typ = "IN" if st.endswith("in") or st in ("0", "3", "4") else "OUT"
     code = str(p["EMP_CODE"]).strip()
+    lat = next((p[k] for k in ("LATITUDE", "LAT") if p.get(k) not in (None, "")), None)
+    lng = next((p[k] for k in ("LONGITUDE", "LNG", "LON", "LONG") if p.get(k) not in (None, "")), None)
     return {"tx_id": f"{code}|{t}|{typ}", "emp_code": code, "punch_time": t, "log_type": typ,
+            "latitude": coord(lat, 90), "longitude": coord(lng, 180),
             "device": p.get("TERMINAL_ALIAS") or p.get("TERMINAL_SN") or p.get("AREA_NAME") or "",
             "name": " ".join(filter(None, [p.get("FIRST_NAME"), p.get("LAST_NAME")])).strip()}
 
 
-def ingest(punches, ts):
+def ingest(punches, ts, strict=False):
     """Store punches as pending; returns (new, unreadable). Same punch twice is ignored."""
     rows, bad = [], 0
     for p in punches:  # may page through the ETP API: do it before taking the DB write lock
         try:
-            r = normalize(p)
-        except (KeyError, ValueError, AttributeError):
+            r = normalize(p, strict)
+        except (KeyError, ValueError, AttributeError, TypeError):
             bad += 1
             continue
-        rows.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, ts, ts))
+        rows.append((r["tx_id"], r["emp_code"], r["punch_time"], r["log_type"], r["device"], r["name"] or None, r["latitude"], r["longitude"], ts, ts))
     with db() as d:
         before = d.total_changes
         d.executemany(
-            "INSERT OR IGNORE INTO log(tx_id, emp_code, punch_time, log_type, device, employee_name, status, message, attempts, created, updated)"
-            " VALUES(?,?,?,?,?,?,'pending','',0,?,?)", rows)
+            "INSERT OR IGNORE INTO log(tx_id, emp_code, punch_time, log_type, device, employee_name, latitude, longitude, status, message, attempts, created, updated)"
+            " VALUES(?,?,?,?,?,?,?,?,'pending','',0,?,?)", rows)
         return d.total_changes - before, bad
 
 
@@ -321,11 +357,11 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 <span class=pgb>{% if n>1 %}<a class="btn alt" href="{{url_for(ep,**dict(a,page=n-1))}}">Previous</a>{% endif %}<span>Page {{n}} of {{pages}}</span>{% if n<pages %}<a class="btn alt" href="{{url_for(ep,**dict(a,page=n+1))}}">Next</a>{% endif %}</span></div>{% endif %}{% endmacro %}
 {% macro ind(s) %}<span class="ind {{s}}">{{L[s]}}</span>{% endmacro %}
 {% macro logtable(rows, retry=True, empty='No punches.') %}<div class=tw><table>
-<tr><th>Punch time<th>Code<th>Employee<th>In/Out<th>Device<th>Status<th class=n>Tries<th>Message<th></tr>
-{% for r in rows %}<tr><td>{{r.punch_time}}<td>{{r.emp_code}}<td>{{r.employee_name or r.employee or '–'}}<td>{{r.log_type|title}}<td>{{r.device or '–'}}
+<tr><th>Punch time<th>Code<th>Employee<th>In/Out<th>Device<th>Location<th>Status<th class=n>Tries<th>Message<th></tr>
+{% for r in rows %}<tr><td>{{r.punch_time}}<td>{{r.emp_code}}<td>{{r.employee_name or r.employee or '–'}}<td>{{r.log_type|title}}<td>{{r.device or '–'}}<td>{% if r.latitude is not none and r.longitude is not none %}<a href="https://www.google.com/maps?q={{r.latitude}},{{r.longitude}}" target=_blank rel=noopener>{{'%.5f'|format(r.latitude)}}, {{'%.5f'|format(r.longitude)}}</a>{% else %}–{% endif %}
 <td>{{ind(r.status)}}<td class=n>{{r.attempts or 0}}<td class=wrap>{{r.message}}
 <td>{% if retry and r.status in ('error','pending') %}<form method=post action="{{url_for('retry',tx_id=r.tx_id)}}"><button class="sm alt">Retry</button></form>{% endif %}</tr>
-{% else %}<tr><td colspan=9 class=empty>{{empty}}</tr>{% endfor %}</table></div>{% endmacro %}
+{% else %}<tr><td colspan=10 class=empty>{{empty}}</tr>{% endfor %}</table></div>{% endmacro %}
 
 {% if page=='dash' %}<div class=ph><div><h2>Dashboard</h2><p class=sub>Punches are pulled from Easy TimePro and added to ERPNext as Employee Checkins.</p></div>
 <form method=post action="{{url_for('do_sync')}}"><button {{'disabled' if running}}>{{'Syncing…' if running else 'Sync now'}}</button></form></div>
@@ -407,10 +443,10 @@ def logs_csv():
     rows, _ = query_logs(request.args, paged=False)
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["punch_time", "emp_code", "employee", "employee_name", "log_type", "device", "status", "attempts", "message", "checkin"])
+    w.writerow(["punch_time", "emp_code", "employee", "employee_name", "log_type", "device", "latitude", "longitude", "status", "attempts", "message", "checkin"])
     for r in rows:
         w.writerow([r["punch_time"], r["emp_code"], r["employee"], r["employee_name"], r["log_type"], r["device"],
-                    r["status"], r["attempts"], r["message"], r["checkin"]])
+                    r["latitude"], r["longitude"], r["status"], r["attempts"], r["message"], r["checkin"]])
     return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=punch_logs.csv"})
 
 
@@ -434,7 +470,7 @@ def receive_punches():
         body = body.get("data", [body])
     if not isinstance(body, list):
         return jsonify(error="expected a JSON list of punches"), 400
-    new, bad = ingest(body, now())
+    new, bad = ingest(body, now(), strict=True)
     sync("webhook", fetch=False, fetched=new)  # if a sync is already running, rows stay pending for the next one
     return jsonify(received=len(body), new=new, unreadable=bad)
 

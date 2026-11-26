@@ -1,8 +1,9 @@
-import os, tempfile
+import json, os, tempfile
 import app
 
 app.DB = os.path.join(tempfile.mkdtemp(), "t.db")
 app.init()
+real_push = app.push
 
 def punch(code, t, state, **kw):
     return {'COMPANY_NAME': 'COMPANY', 'EMP_CODE': code, 'FIRST_NAME': 'XYZ', 'LAST_NAME': '', 'DEPT_NAME': 'Department',
@@ -35,14 +36,27 @@ assert st == {"7IN": ("ok", 1), "7OUT": ("ok", 1), "9IN": ("ok", 2)}, st
 cl = app.app.test_client()
 tok = app.cfg()["webhook_token"]
 assert cl.post("/api/punches", json=[punch('7', '26-11-2026 09:00:00', 'Check In')]).status_code == 401
-r = cl.post("/api/punches?token=" + tok, json=[punch('7', '26-11-2026 09:00:00', 'Check In'), punch('7', '26-11-2026 09:00:00', 'Check In')])
+r = cl.post("/api/punches?token=" + tok, json=[punch('7', '26-11-2026 09:00:00', 'IN'), punch('7', '26-11-2026 09:00:00', 'IN')])
 assert r.status_code == 200 and r.json == {"received": 2, "new": 1, "unreadable": 0}, r.json
-assert cl.post("/api/punches", headers={"X-Token": tok}, json={"data": [punch('8', '26-11-2026 09:00:00', 'Check In')]}).json["new"] == 1
+assert cl.post("/api/punches", headers={"X-Token": tok}, json={"data": [punch('8', '26-11-2026 09:00:00', 'in')]}).json["new"] == 1
 assert cl.post("/api/punches?token=" + tok, json="x").status_code == 400
 for u in ("/", "/logs", "/logs?status=ok&q=Emp&date_from=2026-11-25", "/runs", "/config"):
     assert cl.get(u).status_code == 200, u
 assert tok.encode() in cl.get("/config").data
 assert cl.get("/logs.csv?status=ok").data.count(b"\n") == 6
+
+# the API takes only IN/OUT; the pull from Easy TimePro still understands its own codes
+url = "/api/punches?token=" + tok
+for state in ("Check In", "0", "", "BREAK"):
+    assert cl.post(url, json=[punch('3', '26-11-2026 10:00:00', state)]).json["unreadable"] == 1, state
+assert app.normalize(punch('3', '26-11-2026 10:00:00', 'Check In'))["log_type"] == "IN"
+# latitude / longitude: optional, range-checked, stored
+assert cl.post(url, json=[punch('3', '26-11-2026 10:00:00', 'OUT', LATITUDE=91, LONGITUDE=1),
+                          punch('3', '26-11-2026 10:01:00', 'OUT', LAT='north', LNG=1)]).json["unreadable"] == 2
+assert cl.post(url, json=[punch('3', '26-11-2026 10:02:00', 'out', lat='23.0225', LNG=72.5714)]).json["new"] == 1
+with app.db() as d:
+    assert tuple(d.execute("SELECT log_type, latitude, longitude FROM log WHERE emp_code='3'").fetchone()) == ("OUT", 23.0225, 72.5714)
+assert app.normalize(punch('3', '04-03-2024 09:00:00', 'Check In'))["latitude"] is None
 print("OK")
 
 tx = "9|2026-11-25 09:05:00|IN"
@@ -124,3 +138,29 @@ assert b"Showing 1" in r1 and b"Page 1 of 3" in r1 and b">Next<" in r1 and b">Pr
 assert b"Page 3 of 3" in r3 and b">Previous<" in r3 and b">Next<" not in r3
 assert cl.get("/runs?page=abc").status_code == 200 and cl.get("/logs?page=-4&status=ok").status_code == 200
 print("OK paging")
+
+# --- ERPNext lookup: Active employees only, one lookup per code, coordinates sent
+class FakeHttp:
+    def __init__(self, data):
+        self.data, self.gets, self.posted = data, 0, []
+
+    def get(self, url, **kw):
+        self.gets += 1
+        self.filters = json.loads(kw["params"]["filters"])
+        return type("R", (), {"ok": True, "status_code": 200, "text": "", "json": lambda s: {"data": self.data}})()
+
+    def post(self, url, **kw):
+        self.posted.append(kw["json"])
+        return type("R", (), {"ok": True, "json": lambda s: {"message": {"employee": "HR-EMP-1", "employee_name": "A", "name": "C1"}}})()
+
+
+c0 = {"erp_url": "http://x", "erp_key": "k", "erp_secret": "s", "employee_field": "attendance_device_id"}
+row = {"emp_code": "55", "punch_time": "2026-11-26 09:00:00", "device": "G", "log_type": "IN", "latitude": 23.5, "longitude": 72.5}
+app.http = FakeHttp([{"name": "HR-EMP-1"}])
+assert real_push(c0, row)[0] == "ok" and real_push(c0, row)[0] == "ok" and app.http.gets == 1
+assert app.http.filters == [["attendance_device_id", "=", "55"], ["status", "=", "Active"]]
+p = app.http.posted[0]
+assert (p["employee_field_value"], p["employee_fieldname"], p["latitude"], p["longitude"]) == ("HR-EMP-1", "name", 23.5, 72.5), p
+app.http = FakeHttp([])
+assert real_push(dict(c0, _emp={}), row)[:2] == ("error", "No active Employee with attendance_device_id = 55")
+print("OK active + geo")
