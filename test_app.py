@@ -150,8 +150,8 @@ class FakeHttp:
         return type("R", (), {"ok": True, "status_code": 200, "text": "", "json": lambda s: {"data": self.data}})()
 
     def post(self, url, **kw):
-        self.posted.append(kw["json"])
-        return type("R", (), {"ok": True, "json": lambda s: {"message": {"employee": "HR-EMP-1", "employee_name": "A", "name": "C1"}}})()
+        self.posted.append((url, kw["json"]))
+        return type("R", (), {"ok": True, "json": lambda s: {"data": {"employee": "HR-EMP-1", "employee_name": "A", "name": "C1"}}})()
 
 
 c0 = {"erp_url": "http://x", "erp_key": "k", "erp_secret": "s", "employee_field": "attendance_device_id"}
@@ -159,8 +159,11 @@ row = {"emp_code": "55", "punch_time": "2026-11-26 09:00:00", "device": "G", "lo
 app.http = FakeHttp([{"name": "HR-EMP-1"}])
 assert real_push(c0, row)[0] == "ok" and real_push(c0, row)[0] == "ok" and app.http.gets == 1
 assert app.http.filters == [["attendance_device_id", "=", "55"], ["status", "=", "Active"]]
-p = app.http.posted[0]
-assert (p["employee_field_value"], p["employee_fieldname"], p["latitude"], p["longitude"]) == ("HR-EMP-1", "name", 23.5, 72.5), p
+url, p = app.http.posted[0]
+assert url == "http://x/api/resource/Employee Checkin"  # same request as the old sync script
+assert p == {"employee": "HR-EMP-1", "time": "2026-11-26 09:00:00", "log_type": "IN", "device_id": "G", "latitude": 23.5, "longitude": 72.5}, p
+assert real_push(dict(c0), {**row, "punch_time": "2020-08-20 16:32:00", "latitude": None, "longitude": None})[0] == "ok"
+assert app.http.posted[-1][1] == {"employee": "HR-EMP-1", "time": "2020-08-20 16:32:00", "log_type": "IN", "device_id": "G"}  # no coordinates: no keys
 app.http = FakeHttp([])
 assert real_push(dict(c0, _emp={}), row)[:2] == ("error", "No active Employee with attendance_device_id = 55")
 print("OK active + geo")
