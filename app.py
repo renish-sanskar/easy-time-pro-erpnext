@@ -270,7 +270,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8><title>Attendan
 --ok:#5cc07c;--err:#ff7a70;--warn:#e0b050;--wait:#8c8c8c}}
 *{box-sizing:border-box}body{margin:0;font:13px/1.5 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
 a{color:var(--blue)}
-header{background:var(--card);border-bottom:1px solid var(--line)}
+header{background:var(--card);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
 .bar{max-width:1100px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:24px}
 .brand{display:flex;align-items:center;gap:9px;text-decoration:none;color:var(--ink);font-size:15px}
 .brand img{height:28px;width:28px;border-radius:6px;display:block}.brand .arr{color:var(--mut)}.brand b{margin-left:6px;font-weight:600}
@@ -305,7 +305,7 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 .fb{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;align-items:end;margin-bottom:16px;padding:18px 22px}.fb label{margin:0}.fb .acts{display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:20px}.stack>*+*{margin-top:20px}
 .hd{display:flex;align-items:center;gap:10px;margin-bottom:6px}.hd img{height:30px;width:30px;border-radius:6px}
-.bar2{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap}
+.bar2{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
 .msg{border:1px solid var(--line);border-left:3px solid var(--blue);background:var(--card);padding:11px 16px;border-radius:6px;margin-bottom:20px}
 .pg{display:flex;gap:12px 20px;align-items:center;justify-content:space-between;flex-wrap:wrap;color:var(--mut);margin-top:18px}.pgb{display:flex;gap:12px;align-items:center}
 @media(max-width:760px){.bar{flex-wrap:wrap;height:auto;padding:10px 16px;gap:6px 16px}nav{order:3;flex-basis:100%;height:36px;overflow-x:auto}.state{margin-left:auto}
@@ -364,7 +364,7 @@ button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}bu
 <label>Re-read the last (days)<input type=number min=0 name=lookback_days value="{{c.lookback_days}}"><small>Each sync also re-reads this many days before the last sync, to catch punches that reached Easy TimePro late (for example from a machine that was offline). Punches already stored are skipped. Use 0 to switch it off.</small></label></div></section>
 <section class=panel><h3>Receive punches from Easy TimePro</h3><p class=sub>If the server can push punches to a URL, point it here with a POST (click to select):</p>
 <label style="margin-top:8px"><input readonly onclick="this.select()" value="{{request.host_url}}api/punches?token={{c.webhook_token}}"></label></section>
-<div class=bar2 style="margin-top:0"><button>Save</button><button class=alt formaction="{{url_for('test')}}">Save and test connections</button></div></form>
+<div class=bar2><button>Save</button><button class=alt formaction="{{url_for('test')}}">Save and test connections</button></div></form>
 {% endif %}
 {% if running and page in ('dash','runs') %}<script>setTimeout(()=>location.reload(),3000)</script>{% endif %}
 </main></body></html>"""
