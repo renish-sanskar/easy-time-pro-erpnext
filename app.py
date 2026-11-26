@@ -303,9 +303,9 @@ button,.btn{background:var(--blue);color:#fff;border:1px solid var(--blue);paddi
 button:hover,.btn:hover{opacity:.9}button:disabled{opacity:.55;cursor:default}button.sm{padding:3px 12px;font-size:12px;line-height:18px}
 .btn.alt,button.alt{background:var(--card);color:var(--ink);border-color:var(--line)}
 .fb{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;align-items:end;margin-bottom:16px;padding:18px 22px}.fb label{margin:0}.fb .acts{display:flex;gap:8px;flex-wrap:wrap;grid-column:1/-1}
-.two{display:grid;grid-template-columns:1fr 1fr;gap:20px}.stack>*+*{margin-top:20px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px}.two>label{margin:0}.panel>.two{margin-top:14px}.stack>*+*{margin-top:20px}
 .hd{display:flex;align-items:center;gap:10px;margin-bottom:6px}.hd img{height:30px;width:30px;border-radius:6px}
-.bar2{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
+.bar2{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap}
 .msg{border:1px solid var(--line);border-left:3px solid var(--blue);background:var(--card);padding:11px 16px;border-radius:6px;margin-bottom:20px}
 .pg{display:flex;gap:12px 20px;align-items:center;justify-content:space-between;flex-wrap:wrap;color:var(--mut);margin-top:18px}.pgb{display:flex;gap:12px;align-items:center}
 @media(max-width:760px){.bar{flex-wrap:wrap;height:auto;padding:10px 16px;gap:6px 16px}nav{order:3;flex-basis:100%;height:36px;overflow-x:auto}.state{margin-left:auto}
